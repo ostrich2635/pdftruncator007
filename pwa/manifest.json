@@ -1,0 +1,6 @@
+{
+  "short_name": "PDFTrimmer",
+  "name": "PDF Page Remover Tool",
+  "start_url": "/",
+  "display": "standalone"
+}
