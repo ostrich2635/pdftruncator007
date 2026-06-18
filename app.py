@@ -8,9 +8,9 @@ import streamlit.components.v1 as components
 
 fitz.TOOLS.mupdf_display_errors(False)
 
-st.set_page_config(page_title="PDF Page Remover", layout="centered")
-st.title("📄 Custom PDF Page Remover")
-st.write("Upload your PDF or ZIP files to strip unwanted pages from the front or back.")
+st.set_page_config(page_title="PDF Truncator & Extractor", layout="centered")
+st.title("📄 PDF Truncator & Extractor")
+st.write("Upload your PDF or ZIP files to remove unwanted pages or extract specific sections in bulk.")
 
 # --- AUTOMATED PWA INJECTION LOGIC ---
 try:
@@ -40,14 +40,35 @@ pwa_html = """
 components.html(pwa_html, height=0, width=0)
 
 # --- Sidebar Configuration ---
-st.sidebar.header("Page Removal Settings")
-st.sidebar.write("Specify how many pages to remove from each PDF.")
+st.sidebar.header("Processing Mode")
+mode = st.sidebar.radio(
+    "Select Operation:", 
+    ["Remove Pages (Front/Back)", "Extract Range", "Extract Specific Pages"]
+)
 
-remove_front = st.sidebar.number_input("Pages to remove from FRONT:", min_value=0, value=0, step=1)
-remove_back = st.sidebar.number_input("Pages to remove from BACK:", min_value=0, value=0, step=1)
+st.sidebar.divider()
 
-if remove_front == 0 and remove_back == 0:
-    st.warning("⚠️ No page removal set. Output PDFs will be identical to the originals.")
+# Initialize variables to avoid unbound errors
+rm_front, rm_back = 0, 0
+extract_start, extract_end = 1, 0
+specific_pages_str = ""
+
+if mode == "Remove Pages (Front/Back)":
+    st.sidebar.write("Specify how many pages to remove from the ends.")
+    rm_front = st.sidebar.number_input("Pages to remove from FRONT:", min_value=0, value=0, step=1)
+    rm_back = st.sidebar.number_input("Pages to remove from BACK:", min_value=0, value=0, step=1)
+    if rm_front == 0 and rm_back == 0:
+        st.warning("⚠️ No page removal set. Output PDFs will be identical to the originals.")
+
+elif mode == "Extract Range":
+    st.sidebar.write("Extract a continuous sequence of pages.")
+    extract_start = st.sidebar.number_input("Start Page (1-indexed):", min_value=1, value=1, step=1)
+    extract_end = st.sidebar.number_input("End Page (0 to go until the last page):", min_value=0, value=0, step=1)
+
+elif mode == "Extract Specific Pages":
+    st.sidebar.write("Extract individual pages using comma-separated numbers.")
+    st.sidebar.caption("Positive = from the start (1, 2). Negative = from the end (-1 is last page, -2 is second to last).")
+    specific_pages_str = st.sidebar.text_input("Pages to extract:", placeholder="e.g., 1, 3, -2")
 
 # --- ZIP Helper Functions ---
 @st.cache_data
@@ -115,7 +136,7 @@ def render_tree(node, z_id, current_path=""):
                 st.checkbox(f"📄 {key} (Will be copied as-is)", key=file_key, disabled=True)
 
 # --- Core PDF Processing Function ---
-def process_pdf_pages(file_bytes, rm_front, rm_back):
+def process_pdf_pages(file_bytes, mode, rm_front, rm_back, ext_start, ext_end, spec_pages):
     doc = fitz.open(stream=file_bytes, filetype="pdf")
     total_pages = doc.page_count
     
@@ -123,14 +144,47 @@ def process_pdf_pages(file_bytes, rm_front, rm_back):
         doc.close()
         return file_bytes
 
-    start_idx = rm_front
-    end_idx = total_pages - rm_back
-    
-    if start_idx >= end_idx or start_idx >= total_pages:
-        doc.close()
-        return None
+    pages_to_keep = []
+
+    if mode == "Remove Pages (Front/Back)":
+        start_idx = rm_front
+        end_idx = total_pages - rm_back
+        if start_idx >= end_idx or start_idx >= total_pages:
+            doc.close()
+            return None
+        pages_to_keep = list(range(start_idx, end_idx))
         
-    pages_to_keep = list(range(start_idx, end_idx))
+    elif mode == "Extract Range":
+        start_idx = max(0, ext_start - 1)
+        end_idx = total_pages if ext_end == 0 else min(total_pages, ext_end)
+        if start_idx >= end_idx or start_idx >= total_pages:
+            doc.close()
+            return None
+        pages_to_keep = list(range(start_idx, end_idx))
+        
+    elif mode == "Extract Specific Pages":
+        parts = [p.strip() for p in spec_pages.split(',') if p.strip()]
+        for p in parts:
+            try:
+                idx = int(p)
+                # Convert to 0-indexed
+                if idx > 0:
+                    actual_idx = idx - 1
+                elif idx < 0:
+                    actual_idx = total_pages + idx
+                else:
+                    continue  # Ignore 0
+                    
+                if 0 <= actual_idx < total_pages:
+                    pages_to_keep.append(actual_idx)
+            except ValueError:
+                pass
+        
+        if not pages_to_keep:
+            doc.close()
+            return None
+
+    # Apply the selection
     doc.select(pages_to_keep)
     
     out_buffer = io.BytesIO()
@@ -182,11 +236,14 @@ if uploaded_files:
                             
                             if is_checked and path.lower().endswith('.pdf'):
                                 try:
-                                    processed_bytes = process_pdf_pages(content, remove_front, remove_back)
+                                    processed_bytes = process_pdf_pages(
+                                        content, mode, rm_front, rm_back, 
+                                        extract_start, extract_end, specific_pages_str
+                                    )
                                     if processed_bytes:
                                         out_zip.writestr(path, processed_bytes)
                                     else:
-                                        st.warning(f"Skipped `{path}`: Requested removal exceeds total pages.")
+                                        st.warning(f"Skipped `{path}`: Requested operation resulted in an empty document.")
                                 except Exception:
                                     out_zip.writestr(path, content)
                             else:
@@ -199,7 +256,7 @@ if uploaded_files:
                     st.download_button(
                         label=f"📥 Download Processed ZIP",
                         data=st.session_state[f"processed_data_{zip_id}"],
-                        file_name=f"trimmed_{uploaded_file.name}",
+                        file_name=f"processed_{uploaded_file.name}",
                         mime="application/zip",
                         key=f"dl_{zip_id}",
                     )
@@ -208,21 +265,24 @@ if uploaded_files:
         elif uploaded_file.name.lower().endswith('.pdf'):
             st.write("---")
             try:
-                processed_bytes = process_pdf_pages(file_bytes, remove_front, remove_back)
+                processed_bytes = process_pdf_pages(
+                    file_bytes, mode, rm_front, rm_back, 
+                    extract_start, extract_end, specific_pages_str
+                )
                 
                 col1, col2 = st.columns([3, 1])
                 with col1:
                     if processed_bytes:
-                        st.success(f"**{uploaded_file.name}** — Pages removed successfully.")
+                        st.success(f"**{uploaded_file.name}** — Document processed successfully.")
                     else:
-                        st.error(f"**{uploaded_file.name}** — Cannot remove {remove_front + remove_back} pages from this document.")
+                        st.error(f"**{uploaded_file.name}** — Requested operation resulted in 0 pages.")
                 
                 if processed_bytes:
                     with col2:
                         st.download_button(
                             label="📥 Download",
                             data=processed_bytes,
-                            file_name=f"trimmed_{uploaded_file.name}",
+                            file_name=f"processed_{uploaded_file.name}",
                             mime="application/pdf",
                             key=uploaded_file.name,
                         )
