@@ -282,7 +282,7 @@ if uploaded_files:
                         st.download_button(
                             label="📥 Download",
                             data=processed_bytes,
-                            file_name=f"processed_{uploaded_file.name}",
+                            file_name=f"{uploaded_file.name}",
                             mime="application/pdf",
                             key=uploaded_file.name,
                         )
